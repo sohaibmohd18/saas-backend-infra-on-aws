@@ -1,0 +1,171 @@
+name: App Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.PROJECT }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          echo "tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: sha-${SHORT_SHA}"
+
+      - name: Build and push to dev ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/${{ vars.PROJECT }}-dev:$IMAGE_TAG"
+          docker build -t "$IMAGE_URI" ./app
+          docker tag "$IMAGE_URI" "$ECR_REGISTRY/${{ vars.PROJECT }}-dev:latest"
+          docker push "$IMAGE_URI"
+          docker push "$ECR_REGISTRY/${{ vars.PROJECT }}-dev:latest"
+
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: dev
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.PROJECT }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS (dev)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.PROJECT }}-dev" \
+            --service "${{ vars.PROJECT }}-dev" \
+            --force-new-deployment \
+            --region "${{ env.AWS_REGION }}"
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${{ vars.PROJECT }}-dev" \
+            --services "${{ vars.PROJECT }}-dev" \
+            --region "${{ env.AWS_REGION }}"
+
+  promote-and-deploy-staging:
+    name: Promote & Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    environment: staging  # Requires manual approval
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.PROJECT }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote image to staging ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          # Pull dev image and push to staging repository
+          docker pull "$ECR_REGISTRY/${{ vars.PROJECT }}-dev:$IMAGE_TAG"
+          docker tag "$ECR_REGISTRY/${{ vars.PROJECT }}-dev:$IMAGE_TAG" \
+            "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:$IMAGE_TAG"
+          docker tag "$ECR_REGISTRY/${{ vars.PROJECT }}-dev:$IMAGE_TAG" \
+            "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:latest"
+          docker push "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:latest"
+
+      - name: Deploy to ECS (staging)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.PROJECT }}-staging" \
+            --service "${{ vars.PROJECT }}-staging" \
+            --force-new-deployment \
+            --region "${{ env.AWS_REGION }}"
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${{ vars.PROJECT }}-staging" \
+            --services "${{ vars.PROJECT }}-staging" \
+            --region "${{ env.AWS_REGION }}"
+
+  promote-and-deploy-prod:
+    name: Promote & Deploy to Prod
+    runs-on: ubuntu-latest
+    needs: promote-and-deploy-staging
+    environment: prod  # Requires manual approval
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.PROJECT }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote image to prod ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          docker pull "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:$IMAGE_TAG"
+          docker tag "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:$IMAGE_TAG" \
+            "$ECR_REGISTRY/${{ vars.PROJECT }}-prod:$IMAGE_TAG"
+          docker tag "$ECR_REGISTRY/${{ vars.PROJECT }}-staging:$IMAGE_TAG" \
+            "$ECR_REGISTRY/${{ vars.PROJECT }}-prod:latest"
+          docker push "$ECR_REGISTRY/${{ vars.PROJECT }}-prod:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/${{ vars.PROJECT }}-prod:latest"
+
+      - name: Deploy to ECS (prod)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.PROJECT }}-prod" \
+            --service "${{ vars.PROJECT }}-prod" \
+            --force-new-deployment \
+            --region "${{ env.AWS_REGION }}"
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${{ vars.PROJECT }}-prod" \
+            --services "${{ vars.PROJECT }}-prod" \
+            --region "${{ env.AWS_REGION }}"
