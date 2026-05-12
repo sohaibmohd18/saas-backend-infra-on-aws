@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is git-ignored (contains account-specific values).
+# backend.hcl is committed and contains non-sensitive backend config.
+
+project        = "myapp"
+environment    = "dev"
+aws_region     = "us-east-1"
+aws_account_id = "123456789012"
+
+alert_email = "dev-alerts@example.com"
+
+# Set this after running: terraform apply -target=module.ecr
+# Format: <account_id>.dkr.ecr.<region>.amazonaws.com/<project>-<env>:latest
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp-dev:latest"
+
+enable_https        = false
+acm_certificate_arn = ""
+
+github_org           = "your-github-org"
+github_repo          = "saas-backend-infra-on-aws"
+create_oidc_provider = true  # Set to false for staging/prod if same account

@@ -1,0 +1,15 @@
+project        = "myapp"
+environment    = "staging"
+aws_region     = "us-east-1"
+aws_account_id = "123456789012"
+
+alert_email = "staging-alerts@example.com"
+
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp-staging:latest"
+
+enable_https        = false
+acm_certificate_arn = ""
+
+github_org           = "your-github-org"
+github_repo          = "saas-backend-infra-on-aws"
+create_oidc_provider = false  # Already created by dev if same account
